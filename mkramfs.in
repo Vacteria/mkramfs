@@ -1,0 +1,114 @@
+#!/bin/bash
+
+set +o posix
+shopt -s expand_aliases
+
+MYSELF="${0}"
+TEXTDOMAIN="${MYSELF##*/}"
+TEXTDOMAINDIR="/usr/share/locale"
+
+RAMFS_CONF="/etc/mkramfs.conf"
+
+. ${RAMFS_CONF}         || exit 1
+. ${RAMFS_LIB}/messages || exit 1
+. ${RAMFS_LIB}/main     || exit 1
+. ${RAMFS_LIB}/compat   || exit 1
+
+SELECTOR="none"
+AND_MODULES="none"
+AND_LOAD="none"
+AND_FILE="init"
+AND_CLEAN="1"
+AND_TMPDIR="initramfs-$$"
+AND_TYPE="local"
+AND_KERNEL="$(uname -r)"
+AND_KMODS="/lib/modules"
+AND_FWRDIR="/lib/firmware"
+AND_OUTFILE="none"
+AND_FLAG="none"
+AND_VERBOSE="0"
+AND_QUIET="0"
+
+SHORTOPTS="celhm:p:f:nt:k:o:vq"
+LONGOPTS="create,extract,list,help,modules:,preload:,file:,noclean,\
+type:,kernel:,outfile:,verbose,quiet"
+
+GLOBALOPTS="$(getopt --options ${SHORTOPTS} --longoptions ${LONGOPTS} --name ${MYSELF} -- "$@")"
+[ "$?" != "0" ] && exit >&2
+eval set -- ${GLOBALOPTS}
+
+while true
+do
+	case ${1} in
+		-c|--create  ) SELECTOR="1"            ;;
+		-e|--extract ) SELECTOR="2"            ;;
+		-l|--list    ) SELECTOR="3"            ;;
+		-h|--help    ) SELECTOR="4"            ;;
+		-m|--modules ) AND_MODULES="${2//,/ }" ;;
+		-p|--preload ) AND_LOAD="${2//,/ }"    ;;
+		-f|--file    ) AND_FILE="${2}"         ;;
+		-n|--noclean ) AND_CLEAN="0"           ;;
+		-t|--type    ) AND_TYPE="${2}"         ;;
+		-k|--kernel  ) AND_KERNEL="${2}"       ;;
+		-o|--outfile ) AND_OUTFILE="${2}"      ;;
+		-v|--verbose ) AND_VERBOSE="1"         ;;
+		-q|--quiet   ) AND_QUIET="1"           ;;
+		-- ) shift ; break                     ;;
+	esac
+	shift
+done
+
+INPUT="${@}"
+
+#
+# Setting macros for scripts
+#
+AND_MODDIR="${AND_KMODS}/${AND_KERNEL}"
+AND_TMPDIR="/tmp/${AND_TMPDIR#/tmp/}"
+
+AND_TYPE="$(echo ${AND_TYPE} | tr [[:upper:]] [[:lower:]])"
+case "${AND_TYPE}" in
+	local|emdedded|live ) readonly _imgtype="${AND_TYPE}" ;;
+	null  ) die "$(gettext 'Empty ramfs type')" ;;
+	?     ) die "$(gettext 'Unsupported %s ramfs type')" "${AND_TYPE}" ;;
+esac
+
+case ${AND_TYPE} in
+	embedded ) _initfile="$(trim_slashes ${AND_TMPDIR}/etc/rc.d/start)" ;;
+	*        ) _initfile="$(trim_slashes ${AND_TMPDIR}/${AND_FILE})"
+esac
+
+readonly _initfile="${_initfile}"
+readonly _tmpdir="${AND_TMPDIR}"
+readonly _basekmods="${AND_KMODS}"
+readonly _kernmods="${AND_MODDIR}"
+readonly _kernver="${AND_KERNEL}"
+readonly _fwrdir="${AND_FWRDIR}"
+readonly _newmods="${AND_MODULES}"
+readonly _loadmods="${AND_LOAD}"
+
+TYPE_HOME="${RAMFS_HOME}/${AND_TYPE}"
+TYPE_HOOKS="${TYPE_HOME}/hooks"
+TYPE_RULES="${TYPE_HOME}/udev"
+TYPE_SKEL="${TYPE_HOME}/skel"
+
+[ "${AND_OUTFILE}" == "none" ] && AND_OUTFILE="/boot/initramfs-${AND_KERNEL}.img"
+[ "${SELECTOR}" == "none" ]    && die "$(gettext '%s need main argument')" "${MYSELF}"
+[ "${AND_VERBOSE}" == "1" ]    && AND_FLAG="-v"
+readonly _v="${AND_FLAG}"
+
+case "${RAMFS_FORMAT}" in
+	gz|gzip|xz ) true ;;
+	*          ) die "$(gettext '%s compress format is not supported')" "${RAMFS_FORMAT}" ;;
+esac
+
+
+case "${SELECTOR}" in
+	1 ) create_initramfs  ;;
+	2 ) echo extract_initramfs ;;
+	3 ) echo list_initramfs    ;;
+	4 ) usage             ;;
+	* ) die "$(gettext 'Invalid %s action')" "${SELECTOR}" ;;
+esac
+
+exit $?

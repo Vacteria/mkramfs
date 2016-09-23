@@ -1,0 +1,720 @@
+#!/bin/sh
+
+#
+# Message levels
+#
+# quiet = 1 -> Only show fatal errors and die
+# quiet = 0 -> Show all messages
+#
+
+log_print_msg()
+{
+	local MSG="${1}"
+	shift
+	
+	printf -- "${MSG}\n" ${@}
+	
+	return 0
+}
+
+log_boot_msg()
+{
+	[ "${QUIET}" == "1" ] && return 0
+	
+	local MSG="${1}"
+	shift
+	
+	printf -- "${MSG}\n" ${@}
+	
+	return 0
+}
+
+log_warning_msg()
+{
+	[ "${QUIET}" == "1" ] && return 0
+	
+	local MSG="${1}"
+	shift
+	
+	printf -- "WARNING : ${MSG}\n" ${@}
+	
+	return 0
+}
+
+log_failure_msg()
+{
+	local MSG="${1}"
+	shift
+	
+	printf -- "ERROR   : ${MSG}\n" ${@}
+	
+	return 0
+}
+
+log_debug_msg()
+{
+	[ "${QUIET}" == "1" ] && return 0
+	
+	local MSG="${1}"
+	shift
+	
+	printf -- " : ${MSG}\n" ${@}
+	
+	return 0
+}
+
+log_mount_failure_msg()
+{	
+	log_failure_msg "Failed to mount %s device\n" ${1}
+	
+	return 0
+}
+
+commander()
+{
+	command -v ${1} &>/dev/null
+	
+	return $?
+}
+
+system_is()
+{
+	# Return codes
+	#
+	# 0 = If system is one of any space separated argument
+	# 1 = If system is not any space separated argument
+	#
+	
+	local I INPUT
+	
+	INPUT="${@}"
+	
+	if [ -n "${INPUT}" ]
+	then
+		for I in ${INPUT}
+		do
+			[ "${SYSTEM}" == "${I}" ] && return 0
+		done
+	fi
+	
+	return 1
+}
+
+get_fs()
+{
+	local DEVICE
+	
+	DEVICE="/dev/${1##/dev/}"
+	
+	lsblock ${DEVICE} | grep -E '^TYPE=.*' | awk -F"=" '{print $2}'
+	
+	return 0 
+}
+
+get_uuid()
+{
+	local DEVICE
+	
+	DEVICE="/dev/${1##/dev/}"
+	
+	lsblock ${DEVICE} | grep -E '^UUID=.*' | awk -F"=" '{print $2}'
+	
+	return 0 
+}
+
+get_label()
+{
+	local DEVICE
+	
+	DEVICE="/dev/${1##/dev/}"
+	
+	lsblock ${DEVICE} | grep -E '^LABEL=.*' | awk -F"=" '{print $2}'
+	
+	return 0 
+}
+
+find_dev_by_uuid()
+{	
+	local INPUT UUID B
+	
+	INPUT="${1}"
+	eval ${INPUT}
+	
+	if [ "${RAMFS_HOTPLUG}" == "udev" ]
+	then
+		if [ -L "/dev/disk/by-uuid/${UUID}" ]
+		then
+			printf -- $(readlink -f /dev/disk/by-uuid/${UUID})
+		fi
+	else
+		for B in $(ls -1 /sys/class/block/ | grep -E '^(md[0-9]p.+|(s|h)d[a-z].+)')
+		do
+			if [ $(get_uuid /dev/${B}) == "${UUID}" ]
+			then
+				printf -- /dev/${B}
+				break
+			fi
+		done
+	fi
+	
+	return 0
+}
+
+find_dev_by_label()
+{	
+	local INPUT LABEL B
+	
+	INPUT="${1}"
+	eval ${INPUT}
+	
+	if [ "${RAMFS_HOTPLUG}" == "udev" ]
+	then
+		if [ -L "/dev/disk/by-label/${LABEL}" ]
+		then
+			printf -- $(readlink -f /dev/disk/by-uuid/${LABEL})
+		fi
+	else
+		for B in $(ls -1 /sys/class/block/ | grep -E '^(md[0-9]p.+|(s|h)d[a-z].+)')
+		do
+			if [ $(get_uuid /dev/${B}) == "${LABEL}" ]
+			then
+				printf -- /dev/${B}
+				break
+			fi
+		done
+	fi
+	
+	return 0
+}
+
+loadmod()
+{
+	local MODULE ARGUENTS
+	
+	MODULE="${1}"
+	shift
+	ARGUMENTS="${@}"
+	
+	if [ -f /proc/modules ]
+	then
+		if ! grep -Eq "^${MODULE}[[:space:]].*" /proc/modules 
+		then
+			log_debug_msg 'Loading %s module' "${MODULE}"
+			if [ "${RAMFS_FULLMODS}" == "0" ]
+			then
+				insmod /lib/modules/${MODULE##/lib/modules/}.ko
+			else
+				modprobe ${MODULE} ${ARGUMENTS}
+			fi
+		else
+			log_debug_msg '%s module is allready loaded' "${MODULE}"
+		fi
+	else
+		log_debug_msg '%s file not found. /proc is mounted ?' "/proc/modules"
+	fi
+	
+	return 0
+}
+
+openshell()
+{
+	setsid sh -c 'exec sh < /dev/tty1 >/dev/tty1 2>&1'
+}
+
+panic_shell()
+{
+	log_print_msg 'Something is really, really wrong. Please, use this shell to'
+	log_print_msg 'debug your system. Then press Ctrl+Alt+Supr to reboot\n'
+	openshell
+}
+
+rescue_shell()
+{
+	log_print_msg 'Entering to rescue shell\n'
+	openshell
+}
+
+wait_and_die()
+{
+	log_print_msg "Press enter to shutdown the system"
+	read
+
+	poweroff
+}
+
+fumount()
+{
+	local MNT="${1}"
+	
+	[ -z "${MNT}" ] && return 1
+	
+	if mountpoint -q "${MNT}"
+	then
+		fuser -mk "${MNT}"
+		if ! umount "${MNT}" 2>/dev/null
+		then
+			for I in $(fuser -m ${MNT})
+			do
+				kill -KILL "${I}"
+			done
+			
+			umount "${MNT}" || return 1
+		fi
+	fi
+	
+	return 0
+}
+
+mount_rw_root()
+{
+	log_boot_msg 'Mounting initramfs %s on rw mode' "/"
+	if ! eval mount -n -o remount,rw / ${STDERR}
+	then
+		log_failure_msg 'Failed to remount / on rw mode'
+		wait_and_die
+	fi
+	
+	return 0
+}
+
+mount_proc()
+{
+	log_boot_msg 'Mounting /proc filesystem'
+	if ! eval mount -t proc proc /proc ${STDERR}
+	then
+		log_mount_failure_msg "/proc"
+		wait_and_die
+	fi
+
+	if system_is live embedded
+	then
+		[ ! -d /etc ] && mkdir -p /etc
+		ln -sf /proc/mounts /etc/mtab
+	fi
+	
+	return 0
+}
+
+mount_sys()
+{
+	log_boot_msg 'Mounting %s virtual filesystem' "/sys"
+	if ! eval mount -t sysfs sysfs /sys ${STDERR}
+	then
+		log_mount_failure_msg "/sys"
+		panic_shell
+	fi
+
+	return 0
+}
+
+mount_dev()
+{
+	log_boot_msg 'Mounting %s virtual filesystem' "/dev"
+	if ! eval mount -t devtmpfs devtmpfs /dev ${STDERR}
+	then
+		log_mount_failure_msg "/dev"
+		panic_shell
+	fi		
+	
+	return 0
+}
+
+mount_run()
+{
+	[ "${RAMFS_HOTPLUG}" == "mdev" ] && return 0
+	
+	log_boot_msg 'Mounting %s virtual filesystem' "/run"
+	if ! eval mount -t tmpfs tmpfs /run ${STDERR}
+	then
+		log_mount_failure_msg "/run"
+		panic_shell
+	fi
+	
+	if system_is "embedded"
+	then
+		mkdir -p /run/lock
+		ln -sf /run /var/run
+		ln -sf /run/lock /var/lock
+	fi
+	 
+  	return 0
+}
+
+move_proc()
+{
+	if [ ! -d "${NEWROOT}/proc" ] 
+	then
+		log_failure_msg "Unable to find /proc directory inside %s device" "${ROOTDEV}"
+		wait_and_die
+	fi
+	
+	log_boot_msg 'Moving %s virtual filesystem' "/proc"
+	if ! eval mount -o move /proc ${NEWROOT}/proc ${STDERR}
+	then
+		log_failure_msg "Failed to move %s to %s" "/proc" "${NEWROOT}/proc"
+		panic_shell
+	fi
+	
+	return 0
+}
+
+move_sys()
+{
+	if [ ! -d "${NEWROOT}/sys" ] 
+	then
+		log_failure_msg "Unable to find /sys directory inside %s device" "${ROOTDEV}"
+		wait_and_die
+	fi
+	
+	log_boot_msg 'Moving %s virtual filesystem' "/sys"
+	if ! eval mount -o move /sys ${NEWROOT}/sys ${STDERR}
+	then
+		log_failure_msg "Failed to move %s to %s" "/sys" "${NEWROOT}/sys"
+		panic_shell
+	fi
+	
+	return 0
+}
+
+move_dev()
+{
+	if [ "${RAMFS_HOTPLUG}" == "mdev" ]
+	then
+		log_boot_msg 'Umounting %s virtual filesystem' "/dev"
+		if ! fumount /dev
+		then
+			log_failure_msg 'Failed to umount %s file system'
+			panic_shell
+		fi
+		
+		return 0
+	fi
+	
+	if [ ! -d "${NEWROOT}/dev" ] 
+	then
+		log_failure_msg "Unable to find /dev directory inside %s device" "${ROOTDEV}"
+		panic_shell
+	fi
+
+	log_boot_msg 'Moving %s virtual filesystem' "/dev"	
+	if ! eval mount -o move /dev ${NEWROOT}/dev ${STDERR}
+	then
+		log_failure_msg "Failed to move %s to %s" "/dev" "${NEWROOT}/dev"
+		panic_shell
+	fi
+	
+	return 0
+}
+
+move_run()
+{
+	[ "${RAMFS_HOTPLUG}" == "mdev" ] && return 0
+	
+	log_boot_msg 'Umounting %s virtual filesystem' "/run"
+	if ! fumount /run
+	then
+		log_failure_msg 'Failed to umount %s file system' "/run"
+		panic_shell
+	fi
+	
+	return 0
+}
+
+move_mountages()
+{
+	stop_hotplug	
+	move_proc
+	move_sys
+	move_dev
+	move_run
+}
+
+parse_cmdline()
+{
+	log_boot_msg 'Parsing cmdline arguments'
+	
+	local CMDLINE PARAM
+	read -r CMDLINE < /proc/cmdline
+	for PARAM in ${CMDLINE}
+	do
+		case ${PARAM} in
+			runlevel=*  ) INITLEVEL=${PARAM#runlevel=*} ;;
+			init=*      ) INITCMD=${PARAM#init=*}         ;;
+			keyboard=*  ) KEYBOARD=${PARAM#keyboard=*} ;;
+			resume=*    ) RESUME=${PARAM#resume=*}     ;;
+			root=*      ) ROOTDEV=${PARAM#root=*} ;;
+			language=*  ) LANGUAGE=${PARAM#language=*} ;;
+			images=*    ) IMAGES=${PARAM#images=*}    ;;
+			rescue      ) RESCUE="1"                  ;;
+			quiet       ) QUIET="1"                   ;;
+			forcefsck   ) FORCEFSCK="1"               ;;
+		esac
+	done
+	
+	return 0
+}
+
+parse_variables()
+{
+	log_boot_msg 'Parsing all environment variables'
+	
+	SYSTEM="${SYSTEM:-local}"
+	INITLEVEL="${INITLEVEL:-3}"
+	INITCMD="${INITCMD:-/sbin/init}"
+	KEYBOARD="${KEYBOARD:-none}"
+	RESUME="${RESUME:-none}"
+	ROOTDEV="${ROOTDEV:-none}"
+	ROOTVOL="${ROOTVOL:-none}"
+	ROOTFS="${ROOTFS:-none}"
+	LANGUAGE="${LANGUAGE:-en}"
+	IMAGES="${IMAGES:-/images}"
+	NEWROOT="${NEWROOT:-/.root}"
+	MEMORY="${MEMORY:-/.memory}"
+	RECUE="${RESCUE:-0}"
+	DEBUG="${DEBUG:-0}"
+	QUIET="${QUIET:-0}"
+	NEWROOT="${NEWROOT:-/.root}"
+	
+	if [ "${QUIET}" == "1" ]
+	then
+		STDERR="&>/dev/null"
+	else
+		STDERR=""
+	fi
+	
+	return 0
+}
+
+load_custom_modules()
+{
+	local MODFILE MOD ARGS
+	
+	log_boot_msg "Loading custom modules before hotplug"
+	
+	MODFILE="/etc/rc.conf.d/modules"
+	
+	if [[ -f "${MODFILE}" && -s "${MODFILE}" ]]
+	then
+		while read MOD ARGS
+		do
+			case ${MOD} in
+				""|"#"*) continue ;;
+			esac
+			loadmod "${MOD}" "${ARGS}"
+		done < ${MODFILE}
+	else
+		log_debug_msg "No modules need be loaded"
+	fi
+	
+	log_boot_msg ''
+	
+	return 0
+}
+
+start_hotplug()
+{
+	log_boot_msg 'Starting hotplug detection'
+
+	case "${RAMFS_HOTPLUG}" in
+		udev )
+			log_debug_msg 'Running udevd daemon'
+			if ! udevd --daemon --resolve-names=never
+			then
+				log_failure_msg "Failed to run udevd daemon"
+				panic_shell
+			fi
+
+			log_debug_msg 'Running trigger udevadm'
+			udevadm trigger --action=add
+			
+			log_debug_msg 'Running settle udevadm'
+			udevadm settle --timeout=10
+		;;
+		mdev )
+			log_debug_msg "Setting mdev as hotplug backend"
+			echo '/sbin/mdev' > /proc/sys/kernel/hotplug
+			
+			log_debug_msg "Loading generic disk support modules"
+			for mod in scsi_mod sd_mod libata ata_generic ata_piix \
+				usb-common usbcore hid usbhid ehci-hcd uhci-hcd \
+				ohci-hcd
+			do
+				loadmod ${mod}
+			done
+			
+			log_debug_msg "Running mdev for devices creation"
+			/sbin/mdev -s
+		;;
+	esac
+	
+	log_boot_msg ''
+	return 0
+}
+
+stop_hotplug()
+{
+	if system_is local live
+	then
+		echo > /proc/sys/kernel/hotplug
+
+		if [ "${RAMFS_HOTPLUG}" == "udev" ]
+		then
+			log_boot_msg 'Stopping udevd daemon'
+			
+			log_debug_msg 'Cleaning udev database'
+			udevadm info --cleanup-db
+				
+			log_debug_msg 'Stopping all udev process'
+			udevadm control --exit
+
+			log_boot_msg ''
+		else
+			log_boot_msg 'Stop hotplug daemon not needed with mdev system'
+		fi
+	else
+		log_boot_msg "Hotplug does not stop on embedded mode"
+	fi
+	
+	return 0
+}
+
+resume_power()
+{
+	[ "${RESUME}" == "none" ] && return 0
+	[ ! -e "/sys/power/resume" ] && return 0
+	
+	if [ -b "$(readlink -f ${RESUME})" ]
+	then
+		log_boot_msg 'Resume recuest found'
+		echo "$(cat /sys/class/block/${RESUME##/dev/}/dev)" > /sys/power/resume
+	else
+		log_warning_msg "Resume is set but %s device not found" "${RESUME}"
+	fi
+	
+	return 0
+}
+
+run_fsck()
+{
+	if [ "${FORCEFSCK}" == "1" ]
+	then
+		log_boot_msg "Running fsck by recuest before mount rootdev"
+		touch /etc/fstab
+		ln -sf /proc/mounts /etc/mtab
+		fsck -fy ${ROOTDEV}
+		rm -f /etc/{fstab,mtab}
+		
+		log_boot_msg ''
+	else
+		log_boot_msg "Checking filesystem with fsck not recuested"
+	fi
+	
+	return 0
+}
+
+mount_root()
+{
+	local I MODLIST
+	
+	[ ! -d "${NEWROOT}" ] && mkdir -p ${NEWROOT}
+	
+	log_boot_msg "Mounting root device"
+	if system_is "live"
+	then
+		log_debug_msg 'Loading images relates kernel modules'
+		for M in loop squashfs aufs
+		do
+			if ! eval loadmod "${M}" ${STDERR}
+			then
+				log_failure_msg "Failed to load %s essential module" "${M}"
+				panic_shell
+			fi
+		done
+		
+		log_debug_msg 'Mounting memory filesystem'
+		if ! mount -t tmpfs -o rw,size=90% tmpfs ${MEMORY}
+		then
+			return 1
+		fi
+		
+		log_debug_msg 'Creatng overlay filesystem struct'
+		mkdir -p ${MEMORY}/.overlay/dev/shm ${MEMORY}/.overlay/proc
+		mkdir -m1777 ${MEMORY}/.overlay/tmp
+
+		log_debug_msg 'Creatng memory filesystem struct'
+		mkdir -p ${MEMORY}/.insdev
+		mkdir -p ${MEMORY}/.sqfs
+		mkdir -p ${MEMORY}/.tmp
+		
+		log_debug_msg 'Mounting %s device on memory' "${INSDEV}"
+		if ! mount ${INSDEV} ${MEMORY}/.insdev
+		then
+			mount_error "${MEMORY}/.insdev"
+			return 1
+		fi
+		
+		log_debug_msg 'Mounting %s image on memory' "${INSFILE}"
+		if ! mount -t squashfs -o loop,ro ${MEMORY}/.insdev/images/${INSFILE} ${MEMORY}/.sqfs
+		then
+			mount_error "${INSFILE}"
+			return 1
+		fi
+		
+		log_debug_msg 'Merging overlay and memory filesystems'
+		if ! mount -t aufs -o rw,dirs=${MEMORY}/.overlay=rw:${MEMORY}/.insdev=ro:${MEMORY}/.sqfs=ro aufs ${NEWROOT}
+		then
+			return 1
+		fi
+		
+		log_boot_msg ''
+	fi
+	
+	if system_is "local"
+	then
+		log_debug_msg 'Mounting %s on %s' "${ROOTDEV}" "${NEWROOT}"
+		if [ "${RAMFS_FULLMODS}" == "1" ]
+		then
+			if ! eval loadmod ${ROOTFS} ${STDERR}  
+			then
+				log_failure_msg "Failed to load %s filesystem module" "${ROOTFS}"
+				panic_shell
+			fi
+		else
+			case ${ROOTFS} in
+				ext3     ) MODILIST="jbd mbcache ext3"            ;;
+				ext4     ) MODLIST="crc16 mbcache jbd2 ext4"      ;;
+				ext2     ) MODLIST="ext2"                         ;;
+				reiserfs ) MODLIST="reiserfs"                     ;;
+				btrfs    ) MODLIST="libcrc32c zlib_deflate btrfs" ;;					
+			esac
+		fi
+		
+		for I in ${MODLIST}
+		do
+			loadmod ${I}
+		done
+		
+		if ! eval mount -t ${ROOTFS} -o ro ${ROOTDEV} ${NEWROOT} ${STDERR}
+		then
+			log_failure_msg "Failed to mount %s root device" "${ROOTDEV}}"
+			panic_shell
+		fi
+		
+		log_boot_msg ''
+	fi
+}
+
+change_root()
+{
+	if system_is "live"
+	then
+		rm -f /proc/mounts
+	fi
+	
+	log_boot_msg 'Switching to new rootdev %s\n' "${NEWROOT}"
+	if ! exec switch_root ${NEWROOT} ${INITCMD} ${INITLEVEL}
+	then
+		log_failure_msg 'Failed to change %s rootdev' "${NEWROOT}"
+		panic_shell
+	fi
+}

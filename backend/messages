@@ -1,0 +1,132 @@
+#!/bin/bash
+
+usage()
+{
+	printf "$(gettext 'Usage : 
+ %s [options] [initramfs]
+ 
+Options :
+ -c, --create    Create a generic initramfs file
+ -e, --extract   Extract an initramfs file on especified path
+ -l, --list      List initramfs file content
+ -h, --help      Show this help ans exit with code 0
+ -m, --modules   Colon separated additional modules
+ -p, --preload   Colon separated preload modules
+ -n, --noclean   Preserve temporal directory
+ -t, --type      RamFS type (local|installer|live)
+ -k, --kernel    Set kernel version to use
+ -o, --outfile   Output path for initramfs file
+ -v, --verbose   Show much possible message (usefull for debug)
+ -q, --quiet     Show only fatal messages
+ ')" "${MYSELF}"
+}
+
+#
+#
+# Message functios
+#
+
+msg()
+{
+	[ "${AND_QUIET}" == "1" ] && return 0
+
+	local MSG="${1}"
+	shift
+	
+	printf "${MSG}\n" "${@}"
+
+	return 0
+}
+ 
+debug()
+{
+	[[ "${AND_QUIET}" == "1" || "${AND_VERBOSE}" == "0" ]] && return 0
+
+	local MSG="${1}"
+	shift
+	
+	printf -- "${MSG}\n" ${@}
+	
+	return 0
+}
+ 
+warn()
+{
+	local MSG="${1}"
+	shift
+	
+	printf "${WARN}${MSG}\n" ${@}
+	
+	return 0
+}
+
+error()
+{
+	local MSG="${1}"
+	shift
+	
+	printf "${ERROR}${MSG}\n" ${@}
+	
+	return 0
+}
+
+log()
+{
+	local MSG="${1}"
+	shift
+	
+	printf "${LOG}${MSG}\n" ${@}
+	
+	return 0
+}
+
+die()
+{
+	local MSG="${1}"
+	shift
+	
+	printf "${ERROR}${MSG}\n" ${@}
+	
+	exit 1
+}
+
+s_print()
+{
+	local OPTS FUNCTION LOGER
+
+	OPTS="$(getopt -o f:l: -l function:,loger -- "${@}")"
+	eval set -- ${OPTS}
+	while true
+	do
+		case ${1} in
+			-f|--function) FUNCTION="${2}" ;;
+			-l|--loger   ) LOGER="${2}"    ;;
+			--           ) shift; break    ;;
+		esac
+		shift
+	done
+	[ -n "${LOGER}" ] && LOGER="${LOGER} => "
+	
+	FUNCTION="${FUNCTION:-log}"	
+	case "${FUNCTION}" in
+		msg|warn|error|die|debug|log) true ;;
+		* ) printf "$(gettext 'Invalid "%s" function')\n" "${FUNCTION}" ;;
+	esac
+	MESSAGE="${1}"
+	shift 1
+
+	case ${MESSAGE} in
+		msg_mis_file       )  ${FUNCTION} "${LOGER}$(gettext 'Missing %s file')" ${1} ;;
+		msg_mis_args       )  ${FUNCTION} "${LOGER}$(gettext 'Missing arguments')" ;;
+		msg_del_any        )  ${FUNCTION} "${LOGER}$(gettext 'Deleting %s')" ${1} ;;
+		msg_fail_load      )  ${FUNCTION} "${LOGER}$(gettext 'Failed to load "%s" file')" ${1} ;;
+		msg_fail_func      )  ${FUNCTION} "${LOGER}$(gettext 'Failed to run %s()')" ${1//()};;
+		msg_fail_extract   )  ${FUNCTION} "${LOGER}$(gettext 'Failed to extract "%s" file')" ${1} ;;
+		msg_installing     )  ${FUNCTION} "${LOGER}$(gettext 'Installing %s into %s')" ${1} ${2};;
+		msg_linking        )  ${FUNCTION} "${LOGER}$(gettext 'Linking %s to %s')" ${1} ${2} ;;
+		msg_unpacking      )  ${FUNCTION} "${LOGER}$(gettext 'Unpacking %s file')" ${1};;
+		msg_copying        )  ${FUNCTION} "${LOGER}$(gettext 'Copying %s target')" ${1};;
+	esac
+	
+	return 0
+}

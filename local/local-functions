@@ -1,0 +1,158 @@
+#!/bin/sh
+
+parse_rootdev()
+{
+	log_boot_msg 'Parsing %s device as rootdev' "${ROOTDEV}"
+
+	local DEVICE
+
+	case "${ROOTDEV}" in
+		/dev/* )
+			log_debug_msg 'Using normal device format' "${ROOTDEV}"
+			ROOTDEV="${ROOTDEV}" 
+		;;
+		UUID=* ) 
+			log_debug_msg 'Finding device by UUID'
+			ROOTDEV="$(find_dev_by_uuid "${ROOTDEV}")"
+		;;
+		LABEL=*) 
+			log_debug_msg 'Finding device by LABEL'
+			ROOTDEV="$(find_dev_by_label "${ROOTDEV}")" 
+		;;
+	esac
+		
+	if [ -z "${ROOTDEV}" ]
+	then
+		log_failure_msg "Unable to find rootdev real device"
+		panic_shell
+	fi
+
+	ROOTFS="$(get_fs ${ROOTDEV})"
+	if [[ -z "${ROOTFS}" || "${ROOTFS}" == "none" ]]
+	then
+		log_failure_msg "Unable to get rootfs for rootdev"
+		panic_shell
+	fi
+	
+	log_debug_msg 'Real rootdev is %s' "${ROOTDEV}"
+	log_boot_msg ''
+	
+	return 0
+}
+
+volume_flags()
+{
+	log_boot_msg 'Parsing flags for %s device' "${ROOTDEV}"
+	
+	case ${ROOTDEV} in
+		/dev/mapper/* | /dev/*/* )
+			log_debug_msg '%s looks like lvm2 volume' "${ROOTDEV}"
+			ROOTLV="1"
+			if commander lvm &>/dev/null
+			then
+				ROOTVG=$(lvm lvs | grep -E "${ROOTDEV##*/}" | gawk '{print $2}')
+				ROOTPV=$(lvm pvs | grep -E "${ROOTVG}" | gawk '{print $1}')
+			fi
+			
+			case "${ROOTPV}" in 
+				/dev/md* )
+					log_debug_msg '%s loks like lvm2 volume inside a %s raid array' "${ROOTPV}"
+					ROOTRAID="1" 
+				;;
+			esac
+		;;
+		/dev/md* )
+			log_debug_msg '%s looks like raid array'
+			if commander mdadm &>/dev/null
+			then
+				ROOTRAID="1"
+			fi
+		;;
+		* ) 
+			log_debug_msg '%s is not volume or raid array' "${ROOTDEV}"
+		;;
+	esac
+
+	log_boot_msg ''
+	return 0
+}
+
+start_raid()
+{
+	commander mdadm &>/dev/null || return 0
+	[ "${ROOTRAID}" == "0" ] && return 0
+
+	log_boot_msg 'Starting RAID array detection'
+	mdadm --examine --scan >/etc/mdadm.conf && \
+	mdadm --stop --scan && \
+	mdadm --assemble --scan && return 0
+	
+	return 1
+}
+
+start_lvm2()
+{
+	commander lvm &>/dev/null || return 0
+	[ "${ROOTLV}" == "0" ] || \
+	[ "${ROOTVG}" == "none" ] || \
+	[ "${ROOTPV}" == "none" ] && return 0
+	
+	log_boot_msg 'Starting lvm2 volumes detection'
+	lvm vgscan --mknodes && \
+	lvm vgchange -ay --ignorelockingfailure 2>/dev/null && return 0
+
+	return 1
+}
+
+start_btrfs()
+{
+	commander btrfs &>/dev/null || return 0
+	[ "${ROOTBTFRS}" == "0" ] && return 0
+	
+	log_boot_msg 'Starting btrfs volumes detection'
+	btrfs device scan &>/dev/null
+	return $?
+}
+
+start_lukus()
+{
+	local COUNT GPG I
+	
+	COUNT="0"
+	
+	commander cryptsetup || return 0
+	
+	log_boot_msg 'Starting lukus decrypt'
+	for I in gpg2 gpg
+	do
+		if commander ${I}
+		then
+			GPG="${I}"
+			break
+		fi
+	done
+	
+	[ "${ROOTLUKUS}" ] == "0" ] && return 0
+	[[ -z "${RAMFS_GPGKEY}" || ! -f "${RAMFS_GPGKEY}" ]] && return 0
+	[ -z "${GPG}" ] && return 0
+	
+	while [ ${COUNT} -lt 5 ]
+	do
+		COUNT=$((${COUNT} + 1))
+		echo
+		echo -n "(try $i) "
+		${GPG} -d -q ${RAMFS_GPGKEY} -o /root/key 2> /dev/null
+
+		if [ ! -e /root/key ]
+		then
+			sleep 5
+			continue
+		fi
+		
+		break
+	done
+	
+	cryptsetup -d /root/key luksOpen ${ROOT_DEV} luks
+	
+	return $?
+}

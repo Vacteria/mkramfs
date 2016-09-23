@@ -1,0 +1,204 @@
+#!/bin/sh
+
+cp_ld_libs()
+{
+	local BIN LD
+	
+	BIN="${1}"
+	[ -z "${BIN}" ] && return 1
+	case $(file --mime-type ${BIN} | cut -d " " -f 2 ) in
+		application/x-sharedlib|application/x-executable) true ;;
+		* )
+			#s_print -f "debug" msg_copying "${BIN}"
+			#cp --parent -af ${BIN} ${AND_TMPDIR}
+			#if [ -L "${BIN}" ]
+			#then
+			#	s_print -f "debug" msg_copying "${BIN}"
+			#	cp --parent -af $(readlink -e ${BIN}) ${AND_TMPDIR}
+			#fi
+			
+			return 0
+		;;
+	esac
+	
+	if [ ! -L "${BIN}" ]
+	then
+		LD="$(ldd -r ${BIN} | sed -e "s/\t//" | cut -d " " -f 1)"
+		[ $? != "0" ] && return 0
+		
+		if [ -n "${LD}" ]
+		then
+			for I in ${LD}
+			do
+				case "${I}" in
+					"(0x"*|not* ) continue ;;
+					* )
+						if [ -r "${I}" ]
+						then
+							I="${I}"
+						else
+							I="$(find /{lib,usr/lib,usr/local/lib} ! -type d -name "${I}" | head -1)"
+						fi
+						
+						[ -e "${AND_TMPDIR}/${I}" ] && continue
+						s_print -f "debug" msg_copying "${I}"
+						cp --parents -af ${I} ${AND_TMPDIR}
+						
+						[[ ! -L "${I}" || -e "${AND_TMPDIR}/${I}" ]] && continue
+						cp --parents -ad $(readlink -e ${I}) ${AND_TMPDIR}
+					;;
+				esac
+			done
+		fi
+	fi
+	
+	return 0
+}
+
+get_mod_deps()
+{
+	[ -z "${1}" ] && return 1
+	
+	modprobe --show-depends --set-version ${AND_KERNEL} ${1} 2>/dev/null | sed -e 's/.*insmod //g'
+	
+	return 0
+}
+
+get_fwr_deps()
+{
+	[ -z "${1}" ] && return 1
+	
+	modinfo --set-version ${AND_KERNEL} -F firmware ${1} 
+	
+	return 0
+}
+
+cp_mod()
+{
+	USE_PARENT="1"
+	USE_DEST=""
+	USE_EXTRACT="0"
+	
+	GLOBALOPTS="$(getopt --options n,d:,x --longoptions noparent,dest:,extract --name ${FUNCNAME} -- "$@")"
+	[ "$?" != "0" ] && exit >&2
+	eval set -- ${GLOBALOPTS}
+
+	while true
+	do
+		case ${1} in
+			-n|--noparent) USE_PARENT="0"  ;;
+			-d|--dest    ) USE_DEST="${2}" ;;
+			-x|--extract ) USE_EXTRACT="1" ;;
+			-- ) shift ; break             ;;
+		esac
+		shift
+	done
+	
+	local I D F
+	
+	for I in ${@}
+	do
+		I="${I%%.ko*}"
+
+		for D in $(get_mod_deps ${I})
+		do
+			if [[ "${USE_PARENT}" == "0" && -n "${USE_DEST}" ]]
+			then
+				F="${D##/*}"
+				E="${F##*.}"
+
+				s_print -f "debug" msg_copying "${D}"
+				if [ "${USE_EXTRACT}" == "1" ]
+				then
+					case "${E}" in 
+						gz ) zcat ${D} > ${USE_DEST}/${F%%.gz}  ;;
+						xz ) xzcat ${D} > ${USE_DEST}/${F%%.gz} ;;
+					esac
+				else
+					cp -af ${D} ${USE_DEST}
+				fi
+			else
+				cp_this ${D}
+			fi
+		done
+		
+		for F in $(get_fwr_deps ${I})
+		do
+			cp_this ${F}
+		done
+	done
+
+	return 0
+}
+
+cp_this()
+{
+	local GLOBALOPTS USE_DEST USE_WARN TARGET PARENT INPUT
+	
+	USER_WARN="1"
+	GLOBALOPTS="$(getopt --options d:i --longoptions dest:,ignore --name ${FUNCNAME} -- "$@")"
+	[ "$?" != "0" ] && exit >&2
+	eval set -- ${GLOBALOPTS}
+
+	while true
+	do
+		case ${1} in
+			-d|--dest  ) USE_DEST="${2}" ;;
+			-i|--ignore) USE_WARN="0"    ;;
+			-- ) shift ; break           ;;
+		esac
+		shift
+	done
+	
+	INPUT="${@}"
+	if [ -z "${USE_DEST}" ]
+	then
+		TARGET="${AND_TMPDIR}"
+		PARENT="--parents"
+	else
+		TARGET="${AND_TMPDIR}/${USE_DEST}"
+		PARENT=""
+	fi
+		
+	for I in ${INPUT}
+	do
+		[ -r "${I}" ]   && I="${I}"
+		[ ! -r "${I}" ] && I="$(type -pa ${I} | head -1)"
+
+		if [ ! -r "${I}" ]
+		then
+			[ "${USE_WARN}" == "1" ] && s_print -f "warn" -L "${FUNCNAME}" msg_mis_file
+			continue
+		fi
+		
+		if [ -L "${I}" ]
+		then
+			s_print -f "debug" msg_copying "${I}"
+			cp ${PARENT} -a --remove-destination ${I} ${TARGET}
+
+			s_print -f "debug" msg_copying "$(readlink -e ${I})"
+			cp ${PARENT} --parents -a --remove-destination $(readlink -e ${I}) ${AND_TMPDIR}
+
+			cp_ld_libs $(readlink -e ${I})
+		else
+			s_print -f "debug" msg_copying "${I}"
+			cp ${PARENT} -a --remove-destination ${I} ${TARGET}
+			if [ ! -d $(readlink -e ${I}) ]
+			then
+				cp_ld_libs $(readlink -e ${I})
+			fi
+		fi
+	done
+	
+	return 0
+}
+
+get_path_by_mode()
+{
+	case "X${1:0:1}" in
+		X/* ) printf "${1}\n"        ;;
+		*?  ) printf "$(pwd)/${1}\n" ;;
+	esac
+
+	return 0
+}

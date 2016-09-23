@@ -1,0 +1,166 @@
+#!/bin/sh
+
+#
+# Alias definitions
+#
+
+alias printf='builtin printf'
+
+if ! builtin command -v gettext >/dev/null
+then
+	alias gettext='printf'
+else
+	alias gettext='gettext -e'
+fi
+
+
+# This file provide so much possible encapsulated functions for generic
+# use. The convention for return states is :
+#
+# 0 = Everithing is ok
+# 1 = File found
+# 2 = File not found
+# 3 = Warnning but no stop
+# 4 = Faltal error and need be stop
+#
+
+commander()
+{
+	#
+	# This funtion return next codes :
+	#
+	# 0 = Program or command found 
+	# 1 = Program or command not found
+	#
+	
+	[ -z "${1}" ] && return 1
+	
+	command -v ${1} >/dev/null
+	
+	return $?
+}
+
+trim_slashes()
+{
+	echo ${@} | tr -s '/'
+	
+	return 0
+}
+
+clean_before()
+{
+	if [ -d "${AND_TMPDIR}" ]
+	then
+		srm "${AND_TMPDIR}"
+	fi
+	
+	if [ -d /tmp ]
+	then
+		find /tmp -mindepth 1 -type d -iname "initramfs-*" | xargs rm -rf
+	fi
+	
+	return 0
+}
+
+#
+# Selector main actions
+#
+
+create_initramfs()
+{
+	local H R F COMMAND
+
+	[ ! -d "${TYPE_HOME}" ]  && die "$(gettext 'Unable to find %s mkramfs module')" "${AND_TYPE}"	
+	[ ! -d "${TYPE_HOOKS}" ] && die "$(gettext 'Unable to find scripts for %s module')" "${AND_TYPE}"
+	[ ! -d "${AND_MODDIR}" ]     && die "$(gettext 'Kernel modules for %s version not found')" "${AND_KERNEL}"
+
+	debug "$(gettext 'Cleanning last temporal directories')"	
+	clean_before
+	
+	msg "$(gettext 'Creating %s %s kernel initramfs')" "${AND_TYPE}" "${AND_KERNEL}"
+	mkdir -p "${AND_TMPDIR}"
+	mkdir -p "${_initfile%/*}"
+
+	for H in $(ls -1 ${TYPE_HOOKS}/ | sort -n)
+	do
+		unset run_hook
+		if [[ "${H##*.}" == "sh" && -f "${TYPE_HOOKS}/${H}" ]]
+		then
+			debug "$(gettext '##### Running %s hook file')" "${H}"
+ 			. ${TYPE_HOOKS}/${H} || die "$(gettext 'Failed to load %s hook')" "${H}"
+ 			if commander run_hook
+ 			then
+				run_hook
+			fi
+		fi
+	done
+	
+	for F in $(find ${RAMFS_HOME}/${AND_TYPE}/skel -mindepth 1 -maxdepth 1)
+	do
+		cp -af ${F} ${AND_TMPDIR}
+	done
+
+	case "${RAMFS_FORMAT}" in
+		xz|lzma ) COMMAND="xz -f --extreme --check=crc32" ;;
+		gz|gzip ) COMMAND="gzip -9"                       ;;
+	esac
+	
+	( cd ${AND_TMPDIR} ; find . | cpio -o -H newc --quiet | ${COMMAND} ) > ${AND_OUTFILE}
+	[ "${AND_CLEAN}" == "1" ] && rm -rf ${AND_TMPDIR}
+	
+	return 0
+}
+
+extract_initramfs()
+{
+	local INPUT FILENAME DESTDIR COMMAND
+	
+	INPUT="${1}"
+	[ -z "${INPUT}" ]   && s_print -f "die" msg_mis_args
+	[ ! -f "${INPUT}" ] && s_print -f "die" msg_mis_file "${INPUT}"
+	[ -L "${INPUT}" ]   && INPUT="$(readlink -f ${INPUT})"
+	
+	FILENAME="${INPUT##*/}"
+	DESTDIR="${FILENAME%%.img*}"
+		
+	case $(file --mime-type ${INPUT} | sed -e 's/.*: //g') in
+			*/x-gzip ) COMMAND="gzip -dc" ;;
+			*/x-xz   ) COMMAND="xz -dc"   ;;
+			*        ) return 1           ;;
+	esac
+	
+	msg "$(gettext 'Explodign %s ramfs file')" "${FILENAME}"
+	[ -d "${DESTDIR}" ] && rm -rf "${DESTDIR}"
+	
+	mkdir -p ${DESTDIR}
+	{ cd ${DESTDIR} 
+		${COMMAND} - | cpio --quiet -id 
+	} < ${INPUT}
+	
+	return 0
+}
+
+list_initramfs()
+{
+	local INPUT FILENAME
+	
+	INPUT="${1}"
+	[ -z "${INPUT}" ]   && s_print -f "die" msg_mis_args
+	[ ! -f "${INPUT}" ] && s_print -f "die" msg_mis_file "${INPUT}"
+	[ -L "${INPUT}" ]   && INPUT="$(readlink -f ${INPUT})"
+	
+	FILENAME="${INPUT##*/}"
+		
+	case $(file --mime-type ${INPUT} | sed -e 's/.*: //g') in
+			*/x-gzip ) true     ;;
+			*        ) return 1 ;;
+	esac
+	
+	msg "$(gettext 'Explodign %s ramdfs file')" "${FILENAME}"
+	[ -d "${DESTDIR}" ] && rm -rf "${DESTDIR}"
+	
+	{ gzip -dc - | cpio --quiet -t; } < ${INPUT}
+	
+	return 0
+}
+
